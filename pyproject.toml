@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "themebuilder"
+version = "1.0.0"
+description = "ThemeBuilder: reference -> values-only spec -> theme map -> own-code scaffold -> compare gate. Standalone CLI + AI-agent ready (Muse, Claude, ChatGPT, OpenCode) with optional API key"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = []
+[project.scripts]
+themebuilder = "themebuilder.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
