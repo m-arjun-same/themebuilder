@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from collections import deque, Counter
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 UA = {"User-Agent": "Mozilla/5.0 themebuilder/1.0"}
 SECTION_TAGS = ("header", "nav", "footer", "section", "article", "aside")
 VOID = {"img", "br", "link", "meta", "input", "hr", "source", "wbr", "col"}
