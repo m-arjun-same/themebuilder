@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from collections import deque, Counter
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 UA = {"User-Agent": "Mozilla/5.0 themebuilder/1.0"}
 SECTION_TAGS = ("header", "nav", "footer", "section", "article", "aside")
 VOID = {"img", "br", "link", "meta", "input", "hr", "source", "wbr", "col"}
@@ -352,10 +352,12 @@ def scaffold(map_data, spec, out_dir, theme_dir=".", forbid_dir=None, kb=None):
             inner = []
             for li, level in enumerate(slot["headings"]):
                 txt = slot["heading"] if li == 0 else ""
-                inner.append(f"<h{level}{'' if txt else ' data-tb-blank=\"heading\"'}>{txt}</h{level}>")
+                blank = "" if txt else ' data-tb-blank="heading"'
+                inner.append(f"<h{level}{blank}>{txt}</h{level}>")
             for i in range(slot["paragraph_count"]):
                 txt = slot["paragraphs"][i] if i < len(slot["paragraphs"]) else ""
-                inner.append(f"<p{'' if txt else ' data-tb-blank=\"paragraph\"'}>{txt}</p>")
+                blank = "" if txt else ' data-tb-blank="paragraph"'
+                inner.append(f"<p{blank}>{txt}</p>")
             for i in range(slot["image_count"]):
                 if i < len(slot["images"]):
                     inner.append(f'<img src="{asset_file(slot["images"][i])}" alt="{slot["images"][i].get("label","")}">')
@@ -365,17 +367,25 @@ def scaffold(map_data, spec, out_dir, theme_dir=".", forbid_dir=None, kb=None):
             labels = slot["link_labels"] or (map_data.get("nav", []) if slot["kind"] in ("nav", "header") else [])
             for i in range(slot["links"]):
                 lab = labels[i] if i < len(labels) else ""
-                inner.append(f'<a href="#"{"" if lab else " data-tb-blank=\"link\""}>{lab}</a>')
+                blank = "" if lab else ' data-tb-blank="link"'
+                inner.append(f'<a href="#"{blank}>{lab}</a>')
             for i in range(slot["buttons"]):
                 lab = slot["cta"].get("label", "") if i == 0 else ""
-                inner.append(f"<button{'' if lab else ' data-tb-blank=\"button\"'}>{lab}</button>")
+                blank = "" if lab else ' data-tb-blank="button"'
+                inner.append(f"<button{blank}>{lab}</button>")
             parts.append(f'<{tag} class="{cls}">{"".join(inner)}</{tag}>')
         if main_open: parts.append("</main>")
         parts.append('<script src="js/main.js"></script></body></html>')
         name = Path(page["name"]).name
         (out / name).write_text("\n".join(parts), encoding="utf-8"); files.append(name)
     t = spec["tokens"]; dur = (t["transitions"][0] if t["transitions"] else "all .6s ease")
-    kf = "\n".join(f"@keyframes {k['name']} {{{' '.join(f'{s['at']} {{{'; '.join(f'{pk}: {pv}' for pk, pv in s['props'].items())}}}' for s in k['steps'])}}}" for k in t["keyframes"])
+    def _kf(k):
+        steps = []
+        for s in k["steps"]:
+            props = "; ".join("%s: %s" % (pk, pv) for pk, pv in s["props"].items())
+            steps.append("%s {%s}" % (s["at"], props))
+        return "@keyframes %s {%s}" % (k["name"], " ".join(steps))
+    kf = "\n".join(_kf(k) for k in t["keyframes"])
     bp = r["breakpoint"] or "768px"
     css = f""":root{{--bg:{r['bg']};--ink:{r['ink']};--accent:{r['accent']};--font:{r['font']}}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font),sans-serif}}
