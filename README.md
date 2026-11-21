@@ -1,4 +1,4 @@
-# ThemeBuilder — Reference → Theme Rebuild Tool (v1.0.0)
+# ThemeBuilder — Reference → Theme Rebuild Tool (v1.1.0)
 
 Our reverse-engineer process as a tool, separate from Mirror100: Mirror100 copies a site; ThemeBuilder **learns** a reference and rebuilds it in fresh own code with a new theme. The reference's code is never downloaded into the build and never reused.
 
@@ -28,6 +28,12 @@ pip install -e .
 # or from the repo once pushed:
 pip install git+https://github.com/m-arjun-same/themebuilder.git
 ```
+
+## Self-learning / evolution (v1.1)
+Every run teaches the tool. `spec`, `scaffold` and `compare` automatically update one knowledge file (`~/.themebuilder/knowledge.json`; override with `--knowledge <file>` or `$THEMEBUILDER_KNOWLEDGE`; opt out with `--no-learn`). It stores **counts and lessons only** — section-kind stats, section sequences, palettes, fonts, breakpoints, keyframes, libraries, eases/durations, which compare metrics differed, and which slot kinds most often lacked theme content. Never reference code, never copy text.
+- `themebuilder learn spec.json [--map map.json] [--verdict accepted|rejected]` — teach it manually from a finished build.
+- `themebuilder evolve` — what it has learned: experience level (apprentice → designer → senior designer → studio lead, by builds learned), top section flows, per-kind content expectations, and pre-flight lessons from past diffs/blanks.
+- **Becoming more designer:** when a new spec is silent on something (no accent colour, no font), scaffold fills it from the most-learned prior and records it in the manifest's `learned_priors`. A spec's own values always win — priors never override the reference being studied.
 
 ## theme.json
 ```json

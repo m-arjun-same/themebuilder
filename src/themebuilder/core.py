@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from collections import deque, Counter
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 UA = {"User-Agent": "Mozilla/5.0 themebuilder/1.0"}
 SECTION_TAGS = ("header", "nav", "footer", "section", "article", "aside")
 VOID = {"img", "br", "link", "meta", "input", "hr", "source", "wbr", "col"}
@@ -277,7 +277,7 @@ def make_map(spec, theme, theme_dir="."):
             "pages": pages_out, "blanks": blanks, "warnings": warnings}
 
 # ---------------------------------------------------------------- scaffold
-def roles(spec, theme_colors=None, theme_font=""):
+def roles(spec, theme_colors=None, theme_font="", kb=None):
     t = spec["tokens"]; colors = t["colors"]
     def by_prop(props, fallback=None):
         if isinstance(props, str): props = (props,)
@@ -298,6 +298,13 @@ def roles(spec, theme_colors=None, theme_font=""):
     for ty in t["typography"]:
         if ty["selector"].strip() == "h1" and "font-size" in ty: r["h1"] = ty["font-size"]
     if theme_colors: r.update({k: v for k, v in theme_colors.items() if v})
+    r["learned_priors"] = []
+    if kb:  # evolution: fill only what THIS spec does not know, from past builds
+        if not t["fonts"] and kb.get("fonts"):
+            r["font"] = max(kb["fonts"], key=kb["fonts"].get); r["learned_priors"].append(f"font={r['font']} (most learned)")
+        if r["accent"] == r["ink"] and kb.get("colors"):
+            for c in sorted(kb["colors"], key=kb["colors"].get, reverse=True):
+                if c not in (r["bg"], r["ink"]): r["accent"] = c; r["learned_priors"].append(f"accent={c} (most learned)"); break
     return r
 
 def _hashes(root):
@@ -314,10 +321,10 @@ def check_no_copied(build_dir, forbid_dir):
             copied.append(str(f))
     return copied
 
-def scaffold(map_data, spec, out_dir, theme_dir=".", forbid_dir=None):
+def scaffold(map_data, spec, out_dir, theme_dir=".", forbid_dir=None, kb=None):
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
     (out / "assets").mkdir(exist_ok=True)
-    r = roles(spec, map_data.get("colors"), map_data.get("font", ""))
+    r = roles(spec, map_data.get("colors"), map_data.get("font", ""), kb=kb)
     copied_assets = {}
     def asset_file(img):
         src = img["src"]
@@ -389,7 +396,8 @@ document.querySelectorAll('.tb').forEach(el=>io.observe(el));
     copied = check_no_copied(out, forbid_dir)
     manifest = {"tool": "themebuilder", "version": VERSION, "theme": map_data["theme"], "files": files,
                 "blanks": map_data["blanks"], "copy_guard": "FAILED" if copied else "passed", "copied_files": copied,
-                "provenance": [i for p in map_data["pages"] for s in p["slots"] for i in s["images"]]}
+                "provenance": [i for p in map_data["pages"] for s in p["slots"] for i in s["images"]],
+                "learned_priors": r["learned_priors"], "knowledge_builds": (kb or {}).get("builds", 0)}
     (out / "_themebuilder.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if copied: raise SystemExit(f"copy-guard FAILED - scaffold files identical to reference files: {copied}")
     return manifest
@@ -418,3 +426,81 @@ def compare(spec, built_dir, map_data=None):
         if f"@keyframes {k['name']}" not in built_css: diffs.append({"metric": "keyframes", "expected": k["name"], "actual": "absent from built CSS"})
     return {"diffs": diffs, "diff_count": len(diffs),
             "note": "Static probe: structure + tokens at spec level. A match also needs the visual scroll-stop probe (desktop + 390px) from the reference_exact_rebuild skill before delivery."}
+
+# ---------------------------------------------------------------- self-learning / evolution
+"""Every spec studied and every build compared teaches the tool.
+Knowledge is one JSON file of COUNTS and lessons - never reference code,
+never copy text (same values-only rule as spec). scaffold/compare/spec
+update it automatically; `evolve` turns it into design guidance, and
+roles() consults it as a prior only where the current spec is silent.
+That is how the tool becomes more designer with every build."""
+def knowledge_path(path=None):
+    return Path(path or os.environ.get("THEMEBUILDER_KNOWLEDGE") or (Path.home() / ".themebuilder" / "knowledge.json"))
+def _kb_new():
+    return {"tool": "themebuilder-knowledge", "version": 1, "builds": 0, "specs_seen": 0,
+            "accepted": 0, "rejected": 0, "kinds": {}, "sequences": {}, "colors": {}, "fonts": {},
+            "breakpoints": {}, "keyframes": {}, "libraries": {}, "eases": {}, "durations": {},
+            "diff_metrics": {}, "blank_kinds": {}}
+def load_knowledge(path=None):
+    p = knowledge_path(path)
+    if p.exists():
+        try:
+            kb = json.loads(p.read_text(encoding="utf-8"))
+            return {**_kb_new(), **kb}
+        except Exception: pass
+    return _kb_new()
+def save_knowledge(kb, path=None):
+    p = knowledge_path(path); p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(kb, indent=2), encoding="utf-8"); return str(p)
+def _bump(counter, key, n=1):
+    if key: counter[key] = counter.get(key, 0) + n
+def learn_from_spec(spec, kb):
+    kb["specs_seen"] += 1
+    for page in spec.get("pages", []):
+        kinds = [s["kind"] for s in page["slots"]]
+        for a, b in zip(kinds, kinds[1:]): _bump(kb["sequences"], f"{a}>{b}")
+        for s in page["slots"]:
+            k = kb["kinds"].setdefault(s["kind"], {"slots": 0, "images": 0, "paragraphs": 0, "headings": 0})
+            k["slots"] += 1; k["images"] += s.get("images", 0); k["paragraphs"] += s.get("paragraphs", 0); k["headings"] += len(s.get("headings", []))
+    t = spec.get("tokens", {})
+    for c in t.get("colors", []): _bump(kb["colors"], c["value"])
+    for f in t.get("fonts", []): _bump(kb["fonts"], f["family"])
+    for b in t.get("breakpoints", []): _bump(kb["breakpoints"], b)
+    for k in t.get("keyframes", []): _bump(kb["keyframes"], k["name"])
+    m = spec.get("motion", {})
+    for lib in m.get("libraries", []): _bump(kb["libraries"], lib)
+    for e in m.get("eases", []): _bump(kb["eases"], e)
+    for d in m.get("durations", []): _bump(kb["durations"], str(d))
+    return kb
+def learn_from_compare(result, kb):
+    for d in result.get("diffs", []): _bump(kb["diff_metrics"], str(d.get("metric")))
+    return kb
+def learn_from_build(spec, map_data, kb, verdict=None):
+    kb["builds"] += 1
+    if verdict in ("accepted", "rejected"): kb[verdict] += 1
+    for page in (map_data or {}).get("pages", []):
+        for s in page["slots"]:
+            for b in s.get("blanks", []): _bump(kb["blank_kinds"], s["kind"])
+    return learn_from_spec(spec, kb)
+def _lessons(kb):
+    out = []
+    for metric, n in sorted(kb["diff_metrics"].items(), key=lambda kv: -kv[1])[:5]:
+        out.append(f"Pre-flight: '{metric}' differed {n}x in past compares - check it before running compare.")
+    for kind, n in sorted(kb["blank_kinds"].items(), key=lambda kv: -kv[1])[:5]:
+        out.append(f"Theme content most often missing for '{kind}' slots ({n}x) - collect it before mapping.")
+    return out
+def evolve_report(kb):
+    builds = kb["builds"]
+    level = "apprentice" if builds < 3 else "designer" if builds < 8 else "senior designer" if builds < 20 else "studio lead"
+    top_seq = sorted(kb["sequences"].items(), key=lambda kv: -kv[1])[:5]
+    guidance = []
+    if top_seq: guidance.append("Most learned section flow: " + " | ".join(f"{a} ({n}x)" for a, n in top_seq[:3]))
+    for kind, k in sorted(kb["kinds"].items(), key=lambda kv: -kv[1]["slots"])[:4]:
+        if k["slots"]: guidance.append(f"'{kind}' slots usually carry ~{k['images'] / k['slots']:.1f} images and ~{k['paragraphs'] / k['slots']:.1f} paragraphs - pre-collect that much theme content.")
+    if kb["fonts"]: guidance.append(f"Most learned font: {max(kb['fonts'], key=kb['fonts'].get)} - use as prior only when a spec has no font of its own.")
+    if kb["eases"]: guidance.append(f"Most learned motion ease: {max(kb['eases'], key=kb['eases'].get)}; durations seen: {', '.join(sorted(kb['durations'])[:6])}.")
+    guidance += _lessons(kb)
+    return {"builds": builds, "specs_seen": kb["specs_seen"], "accepted": kb["accepted"], "rejected": kb["rejected"],
+            "level": level, "top_sequences": dict(top_seq),
+            "palette": dict(sorted(kb["colors"].items(), key=lambda kv: -kv[1])[:10]),
+            "fonts": kb["fonts"], "libraries": kb["libraries"], "lessons": _lessons(kb), "guidance": guidance}
