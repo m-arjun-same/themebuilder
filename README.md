@@ -2,6 +2,8 @@
 
 Our reverse-engineer process as a tool, separate from Mirror100: Mirror100 copies a site; ThemeBuilder **learns** a reference and rebuilds it in fresh own code with a new theme. The reference's code is never downloaded into the build and never reused.
 
+**THE RULE:** whichever reference website is given, the finished build must match its UI **100% exactly** - layout, sections and their order/formation, fonts, colours, spacing, transitions, animations and scrolling. Only the theme content changes. No simplification, no interpretation, no "close enough." Not done until compare = 0 diffs AND the visual scroll-stop probe (desktop + 390px) matches side by side. Full process: see PROCESS.md.
+
 ## The flow
 ```bash
 themebuilder spec <reference URL | local mirror/study dir> -o spec.json

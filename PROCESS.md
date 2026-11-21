@@ -6,6 +6,12 @@ dependencies (standard library only). Current version: **1.2.0**.
 
 ---
 
+## THE RULE — 100% exact UI match
+
+For whichever reference website is given, the finished build must match its UI **100% exactly** - layout, sections and their order/formation, fonts, colours, spacing, transitions, animations and scrolling. Only the theme content changes. No simplification, no interpretation, no "close enough." A build is not done until `compare` shows 0 diffs AND the visual scroll-stop probe (desktop + 390px) matches the reference side by side.
+
+---
+
 ## The two sides — always kept separate
 
 ```
