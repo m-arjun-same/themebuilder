@@ -109,3 +109,99 @@ class ThemeBuilderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- collect
+import functools, http.server, threading
+from unittest import mock
+from themebuilder import core
+from themebuilder.core import collect_theme
+
+BIG1 = b"\xff\xd8" + b"H" * 8000
+BIG2 = b"\xff\xd8" + b"C" * 9000
+SITE_HTML = """<!doctype html><html><head><title>Sunny Bakery</title>
+<meta property="og:image" content="hero.jpg">
+<script type="application/ld+json">{"@type":"Bakery","name":"Sunny Bakery","telephone":"+1 555-0100",
+"email":"hello@sunny.example","priceRange":"$$","address":{"@type":"PostalAddress","streetAddress":"1 Main St","addressLocality":"Springfield","postalCode":"12345"},
+"openingHours":"Mo-Sa 08:00-18:00"}</script></head><body>
+<nav><a href="/">Home</a><a href="/menu.html">Menu</a></nav>
+<h1>Sunny Bakery</h1><img src="hero.jpg" alt="Bakery front"><img src="icon.jpg" alt="icon">
+<a href="menu.html">Menu</a><a href="https://instagram.com/sunnybakery">Instagram</a></body></html>"""
+MENU_HTML = """<!doctype html><html><body><h1>Menu</h1><img src="hero.jpg"><img src="cake.jpg" alt="Cake"></body></html>"""
+
+class CollectTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        site = cls.tmp / "site"; site.mkdir()
+        (site / "index.html").write_text(SITE_HTML, encoding="utf-8")
+        (site / "menu.html").write_text(MENU_HTML, encoding="utf-8")
+        (site / "hero.jpg").write_bytes(BIG1); (site / "cake.jpg").write_bytes(BIG2); (site / "icon.jpg").write_bytes(b"x" * 100)
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(site)))
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}/"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown(); shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_collect_site_facts_and_photos(self):
+        out = self.tmp / "t1"; r = collect_theme(site=self.url, out_dir=str(out))
+        self.assertEqual(r["facts"]["name"], "Sunny Bakery")
+        self.assertEqual(r["facts"]["telephone"], "+1 555-0100")
+        self.assertEqual(r["facts"]["email"], "hello@sunny.example")
+        self.assertIn("1 Main St", r["facts"]["address"])
+        self.assertTrue(r["facts"]["hours"])
+        self.assertEqual(len(r["assets"]), 2)  # hero + cake; duplicate hero deduped, tiny icon filtered
+        for a in r["assets"]:
+            self.assertTrue(a["provenance"].startswith("theme website"))
+            self.assertTrue((out / a["src"]).exists())
+        self.assertEqual(r["instagram"]["handle"], "sunnybakery")  # discovered from the site's own link
+        theme = json.loads((out / "theme.json").read_text())
+        self.assertEqual(theme["name"], "Sunny Bakery")
+
+    def test_collected_theme_feeds_map(self):
+        out = self.tmp / "t2"; collect_theme(site=self.url, out_dir=str(out))
+        theme = json.loads((out / "theme.json").read_text())
+        ref = self.tmp / "ref2"; ref.mkdir(exist_ok=True)
+        (ref / "index.html").write_text(REF_HTML, encoding="utf-8")
+        (ref / "style.css").write_text(REF_CSS, encoding="utf-8")
+        (ref / "app.js").write_text(REF_JS, encoding="utf-8")
+        m = make_map(make_spec(str(ref)), theme, str(out))
+        self.assertFalse([w for w in m["warnings"] if "provenance" in w])
+
+    def test_collect_instagram_dir(self):
+        ig = self.tmp / "ig"; ig.mkdir(); (ig / "post_one.jpg").write_bytes(BIG1); (ig / "post_two.jpg").write_bytes(BIG2)
+        r = collect_theme(instagram="sunnybakery", instagram_dir=str(ig), out_dir=str(self.tmp / "t3"))
+        self.assertEqual(len(r["assets"]), 2)
+        self.assertTrue(all("Instagram @sunnybakery" in a["provenance"] for a in r["assets"]))
+
+    def test_find_business_classification(self):
+        ddg = ('<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.yelp.com%2Fbiz%2Fsunny">Y</a>'
+               '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fsunnybakery.example%2F">S</a>'
+               '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.instagram.com%2Fsunnybakery%2F">I</a>')
+        with mock.patch.object(core, "_fetch", return_value=(200, "text/html", ddg.encode(), "")):
+            site, ig, socials = core._find_business("Sunny Bakery")
+        self.assertEqual(site, "https://sunnybakery.example/")
+        self.assertEqual(ig, "sunnybakery")
+        self.assertIn("yelp", socials)
+
+    def test_collect_maps_link(self):
+        orig = core._fetch
+        maps_html = 'rated 4.8(2,345) <img src="https://lh3.googleusercontent.com/p/XYZ=w408-h306-k-no">'
+        def fake(url, *a):
+            if "goo.gl" in url or "google.com/maps" in url:
+                return 200, "text/html", maps_html.encode(), "https://www.google.com/maps/place/Sunny+Bakery/@12.9,77.6,17z"
+            if url.startswith("https://lh3."): return 200, "image/jpeg", BIG1, url
+            if "duckduckgo" in url: return 404, "", b"", url
+            return orig(url, *a)
+        with mock.patch.object(core, "_fetch", side_effect=fake):
+            r = collect_theme(maps="https://maps.app.goo.gl/abc", out_dir=str(self.tmp / "t4"))
+        self.assertEqual(r["facts"]["name"], "Sunny Bakery")
+        self.assertEqual(r["maps"]["rating"], "4.8")
+        self.assertTrue(any("Google Maps" in a["provenance"] for a in r["assets"]))
+
+    def test_collect_needs_an_input(self):
+        with self.assertRaises(SystemExit): collect_theme(out_dir=str(self.tmp / "t5"))
+
+if __name__ == "__main__": unittest.main()

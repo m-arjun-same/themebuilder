@@ -1,4 +1,4 @@
-# ThemeBuilder — Reference → Theme Rebuild Tool (v1.1.0)
+# ThemeBuilder — Reference → Theme Rebuild Tool (v1.2.0)
 
 Our reverse-engineer process as a tool, separate from Mirror100: Mirror100 copies a site; ThemeBuilder **learns** a reference and rebuilds it in fresh own code with a new theme. The reference's code is never downloaded into the build and never reused.
 

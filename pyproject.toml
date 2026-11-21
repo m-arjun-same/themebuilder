@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "themebuilder"
-version = "1.1.0"
+version = "1.2.0"
 description = "ThemeBuilder: reference -> values-only spec -> theme map -> own-code scaffold -> compare gate. Standalone CLI + AI-agent ready (Muse, Claude, ChatGPT, OpenCode) with optional API key"
 readme = "README.md"
 requires-python = ">=3.9"

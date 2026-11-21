@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from collections import deque, Counter
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 UA = {"User-Agent": "Mozilla/5.0 themebuilder/1.0"}
 SECTION_TAGS = ("header", "nav", "footer", "section", "article", "aside")
 VOID = {"img", "br", "link", "meta", "input", "hr", "source", "wbr", "col"}
@@ -504,3 +504,246 @@ def evolve_report(kb):
             "level": level, "top_sequences": dict(top_seq),
             "palette": dict(sorted(kb["colors"].items(), key=lambda kv: -kv[1])[:10]),
             "fonts": kb["fonts"], "libraries": kb["libraries"], "lessons": _lessons(kb), "guidance": guidance}
+
+# ---------------------------------------------------------------- collect
+# The THEME side, kept separate from the reference side: `spec` learns the
+# REFERENCE site's design; `collect` gathers the THEME business's own data -
+# facts + photos from its own website and its Instagram - into a theme.json
+# that `map` can consume. Provenance is recorded for every single asset.
+class _Collect(HTMLParser):
+    CAPTURE = ("title", "h1", "h2", "h3", "p", "a")
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title = ""; self.metas = {}; self.headings = []; self.paragraphs = []
+        self.images = []; self.links = []; self.jsonld = []; self.nav = []
+        self._stack = []; self._script = False; self._buf = []; self._in_nav = 0
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if tag == "meta":
+            k = d.get("property") or d.get("name")
+            if k and d.get("content"): self.metas[k.lower()] = d["content"]
+        if tag == "img":
+            u = d.get("src") or d.get("data-src") or ""
+            if d.get("srcset"): u = d["srcset"].split(",")[0].strip().split()[0] or u
+            if u: self.images.append((u, d.get("alt") or ""))
+        if tag == "nav": self._in_nav += 1
+        if tag == "script" and (d.get("type") or "") == "application/ld+json": self._script = True; self._buf = []
+        if tag in self.CAPTURE: self._stack.append((tag, [], d.get("href") or ""))
+    def handle_data(self, data):
+        if self._script: self._buf.append(data); return
+        for _, buf, _ in self._stack: buf.append(data)
+    def handle_endtag(self, tag):
+        if tag == "script" and self._script: self.jsonld.append("".join(self._buf)); self._script = False
+        if tag == "nav": self._in_nav = max(0, self._in_nav - 1)
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                t, buf, href = self._stack.pop(i); text = " ".join("".join(buf).split())
+                if not text: break
+                if t == "title": self.title = text
+                elif t in ("h1", "h2", "h3"): self.headings.append((int(t[1]), text))
+                elif t == "p":
+                    if len(text) > 1: self.paragraphs.append(text)
+                elif t == "a":
+                    self.links.append((href, text))
+                    if self._in_nav: self.nav.append(text)
+                break
+
+def _jsonld_facts(scripts):
+    facts = {}
+    def walk(node):
+        if isinstance(node, list):
+            for x in node: walk(x)
+        elif isinstance(node, dict):
+            t = str(node.get("@type", ""))
+            if any(k in t for k in ("Business", "Organization", "Store", "Restaurant", "Bakery", "Salon", "Shop")) or "name" in node:
+                for key in ("name", "description", "telephone", "email", "priceRange", "url"):
+                    if node.get(key) and key not in facts: facts[key] = str(node[key])
+                addr = node.get("address")
+                if isinstance(addr, dict) and "address" not in facts:
+                    facts["address"] = ", ".join(str(addr[k]) for k in ("streetAddress", "addressLocality", "addressRegion", "postalCode", "addressCountry") if addr.get(k))
+                elif isinstance(addr, str) and "address" not in facts: facts["address"] = addr
+                oh = node.get("openingHours")
+                if oh and "hours" not in facts: facts["hours"] = oh if isinstance(oh, list) else [oh]
+                spec = node.get("openingHoursSpecification")
+                if spec and "hours" not in facts:
+                    spec = spec if isinstance(spec, list) else [spec]
+                    facts["hours"] = [f"{s.get('dayOfWeek', '')} {s.get('opens', '')}-{s.get('closes', '')}".strip() for s in spec if isinstance(s, dict)]
+                if node.get("sameAs") and "sameAs" not in facts: facts["sameAs"] = node["sameAs"]
+            for v in node.values(): walk(v)
+    for s in scripts:
+        try: walk(json.loads(s))
+        except Exception: pass
+    return facts
+
+def _og(html, prop):
+    for pat in (r'<meta[^>]+property=["\']' + re.escape(prop) + r'["\'][^>]+content=["\']([^"\']*)["\']',
+                r'<meta[^>]+content=["\']([^"\']*)["\'][^>]+property=["\']' + re.escape(prop) + r'["\']'):
+        m = re.search(pat, html, re.I)
+        if m: return m.group(1)
+    return ""
+
+def collect_theme(site=None, instagram=None, instagram_dir=None, out_dir="theme-out",
+                  name=None, maps=None, business=None, max_pages=10, min_bytes=6000, max_images=60):
+    if not site and not instagram and not instagram_dir and not maps and not business:
+        raise SystemExit("collect needs at least one theme input: --site, --maps, --business, --instagram or --instagram-dir")
+    out = Path(out_dir); assets_dir = out / "assets"; assets_dir.mkdir(parents=True, exist_ok=True)
+    facts, pages, gaps, socials = {}, [], [], {}
+    seen_hashes, assets, img_candidates = set(), [], []
+    def add_asset(data, ext, label, provenance):
+        h = hashlib.sha256(data).hexdigest()
+        if h in seen_hashes or len(assets) >= max_images: return
+        seen_hashes.add(h)
+        fname = f"photo-{len(assets) + 1:03d}.{ext}"
+        (assets_dir / fname).write_bytes(data)
+        assets.append({"src": f"assets/{fname}", "label": label or f"Photo {len(assets) + 1}", "provenance": provenance})
+    def add_image_url(u, page_url, alt="", provenance=None):
+        if len(assets) >= max_images: return
+        au = urllib.parse.urljoin(page_url, u)
+        if au in [c[0] for c in img_candidates]: return
+        img_candidates.append((au, page_url, alt, provenance))
+    # --- resolve a bare business name or a Google Maps link into site + socials ---
+    if business and not site:
+        found_site, found_ig, extra = _find_business(business)
+        if found_site: site = found_site
+        if found_ig and not instagram: instagram = found_ig
+        socials.update(extra)
+        if not site and not instagram: gaps.append(f"business search for '{business}' found no website or Instagram - give --site, --maps or --instagram directly")
+    if maps:
+        s, _, d, final = _fetch(maps)
+        mhtml = d.decode("utf-8", "ignore") if d else ""
+        mfacts, mphotos = _maps_facts(final or maps, mhtml)
+        for k, v in mfacts.items(): facts.setdefault(k, v)
+        if mfacts.get("name") and not site and not business:
+            found_site, found_ig, extra = _find_business(mfacts["name"])
+            if found_site: site = found_site
+            if found_ig and not instagram: instagram = found_ig
+            socials.update(extra)
+        for pu in mphotos: add_image_url(pu, final or maps, facts.get("name", ""), "Google Maps listing of the theme business")
+    # --- theme website ---
+    if site:
+        base = urllib.parse.urlparse(site); origin = f"{base.scheme}://{base.netloc}"
+        seen, queue = {site}, deque([site])
+        while queue and len(pages) < max_pages:
+            u = queue.popleft(); status, ctype, data, final = _fetch(u)
+            if status >= 400 or not data: continue
+            html = data.decode("utf-8", "ignore"); p = _Collect()
+            try: p.feed(html)
+            except Exception: pass
+            pages.append({"url": final, "title": p.title, "headings": [t for _, t in p.headings][:20], "paragraphs": p.paragraphs[:12]})
+            for k, v in _jsonld_facts(p.jsonld).items(): facts.setdefault(k, v)
+            if not facts.get("description") and p.metas.get("description"): facts["description"] = p.metas["description"]
+            if not facts.get("name") and (p.metas.get("og:site_name") or p.title): facts["name"] = p.metas.get("og:site_name") or p.title
+            if p.metas.get("og:image"): add_image_url(p.metas["og:image"], final, "Main photo")
+            for iu, alt in p.images: add_image_url(iu, final, alt)
+            for href, text in p.links:
+                if href.startswith("mailto:"): facts.setdefault("email", href[7:].split("?")[0])
+                if href.startswith("tel:"): facts.setdefault("telephone", href[4:])
+                for plat in ("instagram.com", "facebook.com", "twitter.com", "x.com", "youtube.com", "linkedin.com"):
+                    if plat in href: socials.setdefault(plat.split(".")[0], urllib.parse.urljoin(final, href))
+                au = urllib.parse.urldefrag(urllib.parse.urljoin(final, href))[0]
+                if au.startswith(origin) and au not in seen and Path(urllib.parse.urlparse(au).path).suffix in ("", ".html", ".htm"):
+                    seen.add(au); queue.append(au)
+            if not facts.get("nav") and p.nav: facts["nav"] = list(dict.fromkeys(p.nav))[:8]
+            blob = html
+            for em in re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", blob):
+                if "email" not in facts and not em.endswith((".png", ".jpg")): facts["email"] = em
+    for au, page_url, alt, prov in img_candidates:
+        if len(assets) >= max_images: break
+        s, ct, d, _ = _fetch(au)
+        ext = Path(urllib.parse.urlparse(au).path).suffix.lower().lstrip(".")
+        if s >= 400 or not d or len(d) < min_bytes: continue
+        if not (ct.startswith("image/") or ext in ("jpg", "jpeg", "png", "webp", "avif")): continue
+        add_asset(d, ext if ext in ("jpg", "jpeg", "png", "webp", "avif") else "jpg", alt, prov or f"theme website {page_url}")
+    # --- Instagram handle discovered from the site's own links, if not given ---
+    if not instagram and socials.get("instagram"):
+        instagram = socials["instagram"].rstrip("/").split("/")[-1]
+    ig_facts = {}
+    if instagram:
+        handle = instagram.strip().lstrip("@")
+        if "instagram.com/" in handle: handle = handle.split("instagram.com/")[-1].strip("/").split("/")[0]
+        ig_facts["handle"] = handle
+        s, _, d, _ = _fetch(f"https://www.instagram.com/{handle}/")
+        html = d.decode("utf-8", "ignore") if d else ""
+        desc, img = _og(html, "og:description"), _og(html, "og:image")
+        if desc:
+            ig_facts["description"] = desc
+            m = re.search(r"([\d.,]+\s*[KM]?)\s+Followers", desc)
+            if m: ig_facts["followers"] = m.group(1)
+            m = re.search(r"on Instagram:\s*[\"“](.+?)[\"”]\s*$", desc)
+            if m: ig_facts["bio"] = m.group(1)
+        if img:
+            s2, _, d2, _ = _fetch(img)
+            if s2 < 400 and d2: add_asset(d2, "jpg", f"Instagram @{handle} profile photo", f"Instagram @{handle} public profile page")
+        if not desc and not img:
+            gaps.append(f"Instagram @{handle}: public page exposed no data (login wall). Collect its photos via the connected Instagram account into a folder and re-run with --instagram-dir, or add assets manually.")
+    # --- Instagram / media folder provided by the user or the agent ---
+    if instagram_dir:
+        src_dir = Path(instagram_dir)
+        if not src_dir.exists(): gaps.append(f"instagram-dir not found: {instagram_dir}")
+        else:
+            prov = f"Instagram @{ig_facts.get('handle')} (provided folder)" if ig_facts.get("handle") else "provided media folder"
+            for f in sorted(src_dir.rglob("*")):
+                if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                    add_asset(f.read_bytes(), f.suffix.lower().lstrip("."), f.stem.replace("_", " "), prov)
+    for field, label in (("name", "business name"), ("telephone", "phone"), ("email", "email"), ("address", "address")):
+        if not facts.get(field) and not (field == "name" and name): gaps.append(f"no {label} found - supply it in theme.json by hand")
+    if not assets: gaps.append("no photos collected - add the business's own photos to theme assets by hand")
+    theme = {"name": name or facts.get("name", ""), "business": facts.get("description", ""),
+             "tagline": "", "nav": facts.get("nav", []), "colors": {}, "font": "",
+             "assets": assets, "sections": []}
+    collected = {"tool": "themebuilder", "version": VERSION, "theme_site": site, "maps": facts.pop("maps", None), "business_query": business, "instagram": ig_facts,
+                 "socials": socials, "facts": {k: v for k, v in facts.items() if k != "nav"},
+                 "pages": pages, "assets": assets, "gaps": gaps,
+                 "note": "Facts + photos collected from the THEME business's own website/Instagram only. Sections are left empty on purpose: map flags what is still missing instead of inventing it."}
+    (out / "theme.json").write_text(json.dumps(theme, indent=2), encoding="utf-8")
+    (out / "collected.json").write_text(json.dumps(collected, indent=2), encoding="utf-8")
+    return collected
+
+def _slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-") or "theme"
+
+def _ddg_results(html):
+    urls = []
+    for href in re.findall(r'href="([^"]+)"', html or ""):
+        if "uddg=" in href:
+            href = urllib.parse.unquote(href.split("uddg=")[-1].split("&")[0])
+        if href.startswith("http") and "duckduckgo.com" not in href: urls.append(href)
+    return list(dict.fromkeys(urls))
+
+def _find_business(query):
+    """Best-effort free search (DuckDuckGo HTML) for a bare business name:
+    returns (website, instagram_handle, socials). Directories/socials are
+    never mistaken for the business's own website."""
+    socials, website, ig = {}, None, None
+    skip = ("facebook.com", "instagram.com", "yelp.", "tripadvisor.", "youtube.com", "twitter.com", "x.com", "linkedin.com", "google.", "zomato.", "swiggy.", "justdial.", "indiamart.", "pinterest.")
+    for q in (query, query + " instagram"):
+        s, _, d, _ = _fetch("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(q))
+        for u in _ddg_results(d.decode("utf-8", "ignore") if d else ""):
+            host = urllib.parse.urlparse(u).netloc.lower()
+            if "instagram.com" in host:
+                handle = u.rstrip("/").split("/")[-1]
+                if handle and handle not in ("p", "reel", "explore"): ig = ig or handle; socials.setdefault("instagram", u)
+            elif any(k in host for k in skip): socials.setdefault(host.split(".")[-2], u)
+            elif website is None: website = u
+    return website, ig, socials
+
+def _maps_facts(final_url, html):
+    """Parse what a Google Maps place link exposes without a browser:
+    name + coordinates from the resolved URL, rating/reviews and photos
+    from the page payload. Anything not found is left for the gaps list."""
+    facts, photos = {}, []
+    u = urllib.parse.unquote(final_url or "")
+    m = re.search(r"/place/([^/]+)/", u)
+    if m: facts["name"] = m.group(1).replace("+", " ")
+    elif "query=" in u: facts["name"] = urllib.parse.parse_qs(urllib.parse.urlparse(u).query).get("query", [""])[0]
+    m = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", u)
+    if m: facts["maps"] = {"url": final_url, "lat": m.group(1), "lng": m.group(2)}
+    if html:
+        m = re.search(r"([0-5]\.\d)\s*\(([\d,]+)\)", html)
+        if m: facts.setdefault("maps", {}) .update({"rating": m.group(1), "reviews": m.group(2)})
+        for pu in re.findall(r"https://lh[345]\.googleusercontent\.com/[^\s\"'\\]+", html):
+            pu = re.sub(r"=w\d+-h\d+[^\"']*$", "=w1200-h900-k-no", pu)
+            if pu not in photos: photos.append(pu)
+        m = re.search(r"(\+?\d[\d\s().-]{8,}\d)", html)
+        if m: facts.setdefault("telephone", m.group(1).strip())
+    return facts, photos[:30]
